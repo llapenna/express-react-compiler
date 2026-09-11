@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Render harness</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+      }
+      body {
+        margin: 0;
+        height: 100vh;
+        display: grid;
+        grid-template-rows: auto 1fr;
+        background: #f9fafb;
+        color: #16181d;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 16px;
+        background: #fff;
+        border-bottom: 1px solid #eaecf0;
+      }
+      header strong {
+        margin-right: auto;
+      }
+      select,
+      button {
+        font: inherit;
+        padding: 6px 12px;
+        border-radius: 6px;
+        border: 1px solid #d0d5dd;
+        background: #fff;
+        cursor: pointer;
+      }
+      button.primary {
+        background: #16181d;
+        border-color: #16181d;
+        color: #fff;
+      }
+      main {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        padding: 12px;
+        min-height: 0;
+      }
+      textarea {
+        font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+        padding: 12px;
+        border-radius: 8px;
+        border: 1px solid #eaecf0;
+        resize: none;
+        tab-size: 2;
+      }
+      .panel {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        min-height: 0;
+      }
+      .status {
+        font: 12px/1.6 ui-monospace, Menlo, monospace;
+        color: #667085;
+        padding: 0 0 6px;
+      }
+      .status[data-tone='error'] {
+        color: #b42318;
+      }
+      iframe {
+        width: 100%;
+        height: 100%;
+        border: 1px solid #eaecf0;
+        border-radius: 8px;
+        background: #fff;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>Render harness</strong>
+      <select id="mock"></select>
+      <button id="download">Download HTML</button>
+      <button id="compile" class="primary">Compile &amp; inject</button>
+    </header>
+
+    <main>
+      <div class="panel">
+        <div class="status" id="source-status">payload source</div>
+        <textarea id="source" spellcheck="false"></textarea>
+      </div>
+      <div class="panel">
+        <div class="status" id="frame-status">no document</div>
+        <iframe
+          id="frame"
+          title="Generated app"
+          sandbox="allow-scripts"
+          referrerpolicy="no-referrer"
+        ></iframe>
+      </div>
+    </main>
+
+    <script type="module">
+      /**
+       * Stands in for the service that embeds the document: it fetches the
+       * compiled HTML and injects it into an opaque-origin frame, then answers
+       * the bridge calls the payload makes.
+       */
+      const $ = (id) => document.getElementById(id)
+      const state = { kind: 'jsx' }
+
+      const setStatus = (id, text, tone) => {
+        $(id).textContent = text
+        $(id).dataset.tone = tone ?? ''
+      }
+
+      const loadMocks = async () => {
+        const { mocks } = await (await fetch('/mocks')).json()
+
+        $('mock').replaceChildren(
+          ...mocks.map((mock) => {
+            const option = document.createElement('option')
+            option.value = mock.name
+            option.textContent = `${mock.name}.${mock.kind}`
+            return option
+          })
+        )
+
+        if (mocks.length) await loadMock(mocks[0].name)
+      }
+
+      const loadMock = async (name) => {
+        const mock = await (await fetch(`/mocks/${name}`)).json()
+
+        state.kind = mock.kind
+        $('source').value = mock.source
+        setStatus('source-status', `${name}.${mock.kind}`)
+      }
+
+      const compileSource = async (download) => {
+        const response = await fetch(`/compile?download=${download ? 1 : 0}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            kind: state.kind,
+            source: $('source').value,
+            title: $('mock').value || 'Generated app'
+          })
+        })
+
+        if (!response.ok) {
+          const { messages = [] } = await response.json()
+          const detail = messages
+            .map((message) =>
+              message.line
+                ? `${message.text} (line ${message.line})`
+                : message.text
+            )
+            .join('\n')
+
+          setStatus('frame-status', detail || 'compile failed', 'error')
+          $('frame').removeAttribute('srcdoc')
+
+          return null
+        }
+
+        return response
+      }
+
+      $('compile').addEventListener('click', async () => {
+        setStatus('frame-status', 'compiling…')
+
+        const response = await compileSource(false)
+        if (!response) return
+
+        const html = await response.text()
+
+        // Exactly what the consuming service does: srcdoc, no same-origin.
+        $('frame').srcdoc = html
+
+        // Empty means the document fetches nothing at runtime.
+        const cdn = response.headers.get('x-cdn-libraries')
+        setStatus(
+          'frame-status',
+          [
+            `${(html.length / 1024).toFixed(0)} KB`,
+            `${response.headers.get('x-compile-ms')} ms`,
+            cdn ? `cdn: ${cdn}` : 'self-contained'
+          ].join(' · ')
+        )
+      })
+
+      $('download').addEventListener('click', async () => {
+        const response = await compileSource(true)
+        if (!response) return
+
+        const url = URL.createObjectURL(await response.blob())
+        const link = document.createElement('a')
+        link.href = url
+        link.download = `${$('mock').value || 'app'}.html`
+        link.click()
+        URL.revokeObjectURL(url)
+      })
+
+      $('mock').addEventListener('change', (event) =>
+        loadMock(event.target.value)
+      )
+
+      /**
+       * The host side of the bridge. A real embedder validates arguments and
+       * checks permissions before running anything; this one answers one
+       * action so `bridge-demo` has something to talk to.
+       */
+      const ACTIONS = {
+        searchCompanies: async ({ query }) => ({
+          query,
+          results: [
+            { name: `${query} holdings`, employees: 214 },
+            { name: `${query} labs`, employees: 38 }
+          ]
+        })
+      }
+
+      addEventListener('message', async (event) => {
+        const frame = $('frame').contentWindow
+        if (!frame || event.source !== frame) return
+
+        const { id, method, params, type, height } = event.data ?? {}
+
+        if (type === 'render:height') {
+          return setStatus('frame-status', `rendered · ${height}px tall`)
+        }
+        if (type === 'render:error') {
+          return setStatus(
+            'frame-status',
+            `${event.data.stage}: ${event.data.detail}`,
+            'error'
+          )
+        }
+        if (typeof id !== 'number' || typeof method !== 'string') return
+
+        const action = ACTIONS[method]
+        const reply = (payload) =>
+          frame.postMessage({ jsonrpc: '2.0', id, ...payload }, '*')
+
+        if (!action) {
+          return reply({ error: { message: `Unknown action: ${method}` } })
+        }
+
+        try {
+          reply({ result: await action(params ?? {}) })
+        } catch (error) {
+          reply({ error: { message: error.message } })
+        }
+      })
+
+      loadMocks()
+    </script>
+  </body>
+</html>
