@@ -13,6 +13,27 @@ export interface Mock {
 
 const KINDS: Record<string, RenderKind> = { '.jsx': 'jsx', '.tsx': 'tsx' }
 
+/**
+ * The fixtures worth looking at first, in the order they make sense in.
+ *
+ * These are the candidate apps rather than demonstrations of a compiler
+ * feature, so they lead the list; alphabetical order would bury them behind
+ * `counter` and `bridge-demo`. Anything not named here follows, alphabetically.
+ */
+const FEATURED = [
+  'close-cockpit',
+  'collections-cockpit',
+  'payment-plan-tracker',
+  'budget-variance',
+  'close-status'
+]
+
+const rank = (name: string): number => {
+  const index = FEATURED.indexOf(name)
+
+  return index === -1 ? FEATURED.length : index
+}
+
 export class UnknownMockError extends Error {
   constructor(name: string) {
     super(`No mock named "${name}"`)
@@ -31,7 +52,7 @@ export const listMocks = async (): Promise<
       name: entry.slice(0, -extname(entry).length),
       kind: KINDS[extname(entry)] as RenderKind
     }))
-    .sort((a, b) => a.name.localeCompare(b.name))
+    .sort((a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name))
 }
 
 /**
