@@ -192,6 +192,76 @@ describe('libraries', () => {
   })
 })
 
+describe('host bridge', () => {
+  it('lists the resources a payload may reach', async () => {
+    const body = (await (await fetch(`${origin}/resources`)).json()) as {
+      resources: { resource: string; kind: string; params: string[] }[]
+    }
+
+    const aging = body.resources.find(
+      (entry) => entry.resource === 'workbook.outputList'
+    )
+
+    assert.equal(aging?.kind, 'query')
+    assert.deepEqual(aging?.params, ['workbookId'])
+    assert.ok(body.resources.some((entry) => entry.kind === 'mutation'))
+    // The frame is scoped to one tenant by the host, never by its own request.
+    assert.ok(
+      body.resources.every((entry) => !entry.params.includes('companyId')),
+      'no resource may take a companyId'
+    )
+  })
+
+  it('compiles a payload that imports the bridge hooks', async () => {
+    const response = await post({
+      kind: 'jsx',
+      source: `import { useHostQuery } from 'host'
+        export default function App() {
+          const { data, isLoading } = useHostQuery('workbook.list')
+          return <p>{isLoading ? 'loading' : (data ?? []).length}</p>
+        }`
+    })
+
+    assert.equal(response.status, 200)
+
+    const html = await response.text()
+
+    // The hooks are compiled in, so nothing about the bridge is fetched.
+    assert.doesNotMatch(html, /https?:\/\//)
+    assert.match(html, /window\.host/)
+  })
+
+  it('compiles the resource catalog into the document as names and kinds only', async () => {
+    const html = await (
+      await post({ kind: 'jsx', source: 'export default () => <p>hi</p>' })
+    ).text()
+
+    assert.match(html, /"workbook\.outputList":"query"/)
+    assert.match(html, /"exports\.request":"mutation"/)
+    // Descriptions are for the generating model, not for every document.
+    assert.doesNotMatch(html, /The signed-in user/)
+  })
+
+  it('refuses a payload that imports the bridge under another name', async () => {
+    const response = await post({
+      kind: 'jsx',
+      source: `import { useHostQuery } from '@concourse/host'
+        export default () => <p>{typeof useHostQuery}</p>`
+    })
+
+    assert.equal(response.status, 422)
+  })
+
+  it('names the bridge in the list of what a payload may import', async () => {
+    const body = (await (await fetch(`${origin}/libraries`)).json()) as {
+      host: { specifier: string; exports: string[] }
+    }
+
+    assert.equal(body.host.specifier, 'host')
+    assert.ok(body.host.exports.includes('useHostQuery'))
+  })
+})
+
 describe('mocks', () => {
   it('lists the fixtures', async () => {
     const body = (await (await fetch(`${origin}/mocks`)).json()) as {

@@ -77,35 +77,118 @@ export const ERROR_HANDLERS = `
 `
 
 /**
- * The frame's only way to reach the host: named actions over postMessage, with
- * a correlation id per call. Injected here, never written by the model — so a
- * payload can invoke an action the host published but cannot widen the surface.
+ * The frame's only way to reach the host, and the whole of it.
  *
- * Nothing here carries a credential. The host runs the real request in its own
- * realm and posts back whatever the action chose to expose.
+ * Three surfaces, all over the same correlated postMessage channel:
+ *
+ * - `host.call(method, params)` — a named action the embedder published.
+ * - `host.query(resource, params)` — a read, answered out of the host's
+ *   TanStack Query cache. The frame names a resource from the catalog below;
+ *   the host owns the query key, the fetcher and the credentials.
+ * - `host.mutate(resource, params)` — a write, which the host runs if it has a
+ *   resolver for it and refuses otherwise.
+ *
+ * Injected here rather than bundled, so the model cannot widen it: a payload
+ * can call an action, but cannot add one, cannot name a URL, and cannot reach
+ * a resource the catalog does not list. The catalog is compiled in so a bad
+ * resource name fails here with a readable message instead of after a round
+ * trip.
+ *
+ * `host.subscribe` is the point of going through the cache at all. When the
+ * host's cache changes — a refetch, a websocket push, the user editing
+ * something in the surrounding app — it posts the affected resources and the
+ * frame re-reads them. A generated app is live without polling and without
+ * network access of its own.
  */
-export const HOST_BRIDGE = `
+export const hostBridge = (
+  catalog: Readonly<Record<string, string>>
+): string => `
   (() => {
+    const CATALOG = ${JSON.stringify(catalog)}
     const pending = new Map()
+    const listeners = new Set()
     let nextId = 0
 
+    const call = (method, params) => {
+      const id = ++nextId
+
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject })
+        parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*')
+        setTimeout(() => {
+          if (pending.delete(id)) reject(new Error(method + ' timed out'))
+        }, 15000)
+      })
+    }
+
+    /**
+     * A document opened on its own — downloaded and double-clicked, or
+     * previewed outside the app — has no host. Without this probe every read
+     * would hang for the full timeout before failing; with it they fail
+     * immediately and the app can render an empty state instead.
+     */
+    const connected = new Promise((resolve) => {
+      const done = (value) => resolve(value)
+
+      addEventListener('message', (event) => {
+        if (event.source === parent && event.data?.type === 'host:hello') {
+          done(true)
+        }
+      })
+
+      parent.postMessage({ type: 'render:hello' }, '*')
+      setTimeout(() => done(false), 1500)
+    })
+
+    const data = async (verb, kind, resource, params) => {
+      if (CATALOG[resource] !== kind) {
+        throw new Error(
+          CATALOG[resource]
+            ? '"' + resource + '" is a ' + CATALOG[resource] + ', not a ' + kind
+            : 'Unknown resource "' + resource + '". Available: ' +
+              Object.keys(CATALOG).join(', ')
+        )
+      }
+
+      if (!(await connected)) {
+        throw new Error(
+          'No host — this document is not embedded in an app that answers data requests.'
+        )
+      }
+
+      return call(verb, { resource, params: params ?? {} })
+    }
+
     window.host = {
-      call(method, params) {
-        const id = ++nextId
-        return new Promise((resolve, reject) => {
-          pending.set(id, { resolve, reject })
-          parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*')
-          setTimeout(() => {
-            if (pending.delete(id)) reject(new Error(method + ' timed out'))
-          }, 15000)
-        })
+      connected,
+      resources: Object.freeze({ ...CATALOG }),
+      call,
+      query: (resource, params) => data('data:query', 'query', resource, params),
+      mutate: (resource, params) =>
+        data('data:mutate', 'mutation', resource, params),
+      /** Called with the resource names whose cached data just changed. */
+      subscribe(listener) {
+        listeners.add(listener)
+
+        return () => listeners.delete(listener)
       }
     }
 
     addEventListener('message', (event) => {
       if (event.source !== parent) return
 
-      const { id, result, error } = event.data ?? {}
+      const { id, result, error, type, resources, changes } = event.data ?? {}
+
+      if (type === 'data:changed') {
+        // "changes" names the exact call (resource + params) where the host
+        // could work it out; "resources" is the coarse fallback.
+        const payload = changes ?? resources ?? []
+
+        for (const listener of listeners) listener(payload)
+
+        return
+      }
+
       const entry = pending.get(id)
       if (!entry) return
 

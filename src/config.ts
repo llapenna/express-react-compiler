@@ -73,6 +73,14 @@ export const CDN_LIBRARIES: Record<string, CdnLibrary> = {
   }
 }
 
+/**
+ * The virtual module that carries the host bridge hooks. Not a package — it
+ * resolves to `services/compile/runtime/host.js`, which shares the bundle's
+ * single React instance, so `useHostQuery` is a real hook and not a second
+ * copy of React pretending to be one.
+ */
+export const HOST_MODULE = 'host'
+
 export const isBundled = (specifier: string): boolean =>
   BUNDLED_LIBRARIES.has(specifier)
 
@@ -80,6 +88,7 @@ export const isCdn = (specifier: string): boolean => specifier in CDN_LIBRARIES
 
 /** Every specifier a payload may name, for the error message and `/libraries`. */
 export const allSpecifiers = (): string[] => [
+  HOST_MODULE,
   ...BUNDLED_LIBRARIES,
   ...Object.keys(CDN_LIBRARIES)
 ]

@@ -4,6 +4,7 @@ import { build, type Plugin } from 'esbuild'
 
 import {
   CDN_LIBRARIES,
+  HOST_MODULE,
   ROOT,
   allSpecifiers,
   isBundled,
@@ -13,6 +14,9 @@ import { CompileError } from './errors.ts'
 import type { BundleResult, RenderKind } from './types.ts'
 
 const ENTRY = resolve(ROOT, 'src/services/compile/runtime/entry.js')
+
+/** What `import { useHostQuery } from 'host'` resolves to. */
+const HOST = resolve(ROOT, 'src/services/compile/runtime/host.js')
 
 /** The specifier `entry.js` imports the payload under. */
 const SOURCE_MODULE = 'render:source'
@@ -63,6 +67,10 @@ const sourcePlugin = (
     }))
 
     build.onResolve({ filter: /.*/, namespace: PAYLOAD_NS }, ({ path }) => {
+      // Not a package: a file in this repo, so the hooks it exports close over
+      // the same React the payload renders with.
+      if (path === HOST_MODULE) return { path: HOST }
+
       // Resolved against this repo's dependencies by esbuild's own resolver.
       if (isBundled(path)) return null
 

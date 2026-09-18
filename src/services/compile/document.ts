@@ -1,12 +1,22 @@
 import { CDN_LIBRARIES } from '../../config.ts'
+import { HOST_RESOURCES } from '../../resources.ts'
 import {
   BOOTSTRAP,
   ERROR_HANDLERS,
   FRAME_STYLES,
-  HOST_BRIDGE,
-  contentSecurityPolicy
+  contentSecurityPolicy,
+  hostBridge
 } from './shell.ts'
 import type { BundleResult } from './types.ts'
+
+/**
+ * Name to kind, which is all the frame needs: enough to reject a typo or a
+ * write dressed up as a read before it costs a round trip, and not so much
+ * that the catalog's descriptions ship in every document.
+ */
+const CATALOG: Record<string, string> = Object.fromEntries(
+  Object.entries(HOST_RESOURCES).map(([resource, { kind }]) => [resource, kind])
+)
 
 const escapeHtml = (value: string): string =>
   value.replace(
@@ -71,7 +81,7 @@ ${bundle.css ? `<style>${bundle.css}</style>` : ''}
 <pre id="error"></pre>
 <div id="root"></div>
 <script>${ERROR_HANDLERS}</script>
-<script>${HOST_BRIDGE}</script>
+<script>${hostBridge(CATALOG)}</script>
 ${cdnScripts(bundle.cdn)}
 <script type="application/json" id="bundle">
 ${Buffer.from(bundle.code, 'utf8').toString('base64')}
